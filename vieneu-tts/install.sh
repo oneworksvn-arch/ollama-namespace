@@ -22,6 +22,7 @@ WEB_PORT=7860
 STREAM_PORT=8001
 PROXY_PORT=7000
 SERVER_MODE="web"  # web | stream
+SHARE_MODE="true"  # true = tao public URL (Gradio share)
 
 # --- CONFIG FILE ---
 CONFIG_DIR="/etc/vieneu-tts"
@@ -119,6 +120,7 @@ WEB_PORT=$WEB_PORT
 STREAM_PORT=$STREAM_PORT
 PROXY_PORT=$PROXY_PORT
 SERVER_MODE=$SERVER_MODE
+SHARE_MODE=$SHARE_MODE
 EOF
     print_ok "Da luu cau hinh."
 }
@@ -288,12 +290,12 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # Start VieNeu-TTS
 if ! (pgrep -f "vieneu-web" &>/dev/null || pgrep -f "vieneu-stream" &>/dev/null || pgrep -f "gradio_main" &>/dev/null); then
-    log "Starting VieNeu-TTS ($SERVER_MODE mode)..."
+    log "Starting VieNeu-TTS ($SERVER_MODE mode, share=$SHARE_MODE)..."
     cd "$INSTALL_DIR"
     if [ "$SERVER_MODE" = "stream" ]; then
         GRADIO_SERVER_NAME=0.0.0.0 nohup uv run vieneu-stream >> /tmp/vieneu-tts-server.log 2>&1 &
     else
-        GRADIO_SERVER_NAME=0.0.0.0 nohup uv run vieneu-web >> /tmp/vieneu-tts-server.log 2>&1 &
+        GRADIO_SERVER_NAME=0.0.0.0 GRADIO_SHARE=${SHARE_MODE:-true} nohup uv run vieneu-web >> /tmp/vieneu-tts-server.log 2>&1 &
     fi
     log "VieNeu-TTS started (PID: $!)"
 else
@@ -439,7 +441,7 @@ cmd_install() {
     local server_ip
     server_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 
-    echo -e "  ${BOLD}Web UI:${NC}         http://${server_ip}:${PROXY_PORT}"
+    echo -e "  ${BOLD}Local URL:${NC}      http://${server_ip}:${PROXY_PORT}"
     echo -e "  ${BOLD}Mode:${NC}           $SERVER_MODE"
     echo -e "  ${BOLD}Proxy Port:${NC}     $PROXY_PORT"
     if [ "$SERVER_MODE" = "web" ]; then
@@ -447,12 +449,22 @@ cmd_install() {
     else
         echo -e "  ${BOLD}Stream Port:${NC}   $STREAM_PORT (internal)"
     fi
+
+    # Hien thi public URL neu co
+    local public_url
+    public_url=$(cat /tmp/vieneu-tts-public-url.txt 2>/dev/null)
+    if [ -n "$public_url" ]; then
+        echo ""
+        echo -e "  ${GREEN}${BOLD}PUBLIC URL: $public_url${NC}"
+        echo -e "  (Truy cap Web UI tu bat ky dau, het han sau 72h)"
+    fi
     echo ""
     echo -e "  ${BOLD}Lenh huu ich:${NC}"
     echo -e "    bash install.sh status     # Xem trang thai"
     echo -e "    bash install.sh test       # Test TTS"
     echo -e "    bash install.sh stop       # Dung server"
     echo -e "    bash install.sh start      # Khoi dong lai"
+    echo -e "    bash install.sh url        # Xem public URL"
     echo ""
 }
 
@@ -470,8 +482,8 @@ cmd_start_internal() {
         echo "Khoi dong VieNeu-TTS Stream API (port $STREAM_PORT)..."
         GRADIO_SERVER_NAME=0.0.0.0 nohup uv run vieneu-stream >> /tmp/vieneu-tts-server.log 2>&1 &
     else
-        echo "Khoi dong VieNeu-TTS Web UI (port $WEB_PORT)..."
-        GRADIO_SERVER_NAME=0.0.0.0 nohup uv run vieneu-web >> /tmp/vieneu-tts-server.log 2>&1 &
+        echo "Khoi dong VieNeu-TTS Web UI (port $WEB_PORT, share=${SHARE_MODE:-true})..."
+        GRADIO_SERVER_NAME=0.0.0.0 GRADIO_SHARE=${SHARE_MODE:-true} nohup uv run vieneu-web >> /tmp/vieneu-tts-server.log 2>&1 &
     fi
     local pid=$!
     echo "PID: $pid"
@@ -490,6 +502,8 @@ cmd_start_internal() {
     while [ $waited -lt $max_wait ]; do
         if curl -s "http://127.0.0.1:$target_port" &>/dev/null; then
             print_ok "VieNeu-TTS da san sang!"
+            # Tim public URL tu log
+            show_public_url
             return 0
         fi
         # Check if process still alive
@@ -505,6 +519,45 @@ cmd_start_internal() {
 
     print_warn "Server chua san sang sau ${max_wait}s. Kiem tra log:"
     echo "  tail -50 /tmp/vieneu-tts-server.log"
+}
+
+# Hien thi public URL tu Gradio share
+show_public_url() {
+    sleep 3  # Doi Gradio tao link
+    local public_url
+    public_url=$(grep -o 'https://[a-zA-Z0-9.-]*\.gradio\.live' /tmp/vieneu-tts-server.log 2>/dev/null | tail -1)
+    if [ -n "$public_url" ]; then
+        echo ""
+        echo -e "${GREEN}${BOLD}  PUBLIC URL: $public_url${NC}"
+        echo -e "  (Link nay co the truy cap tu bat ky dau, het han sau 72h)"
+        echo ""
+        # Luu public URL vao file de tien truy cap
+        echo "$public_url" > /tmp/vieneu-tts-public-url.txt
+    else
+        print_warn "Khong tim thay public URL. Xem log:"
+        echo "  grep gradio.live /tmp/vieneu-tts-server.log"
+    fi
+}
+
+# Hien thi public URL tu file luu
+show_public_url_from_file() {
+    local public_url
+    # Thu doc tu file luu truoc
+    public_url=$(cat /tmp/vieneu-tts-public-url.txt 2>/dev/null)
+    if [ -z "$public_url" ]; then
+        # Thu tim trong log
+        public_url=$(grep -o 'https://[a-zA-Z0-9.-]*\.gradio\.live' /tmp/vieneu-tts-server.log 2>/dev/null | tail -1)
+    fi
+    if [ -n "$public_url" ]; then
+        echo ""
+        echo -e "${GREEN}${BOLD}  PUBLIC URL: $public_url${NC}"
+        echo -e "  (Truy cap Web UI tu bat ky dau, het han sau 72h)"
+        echo ""
+    else
+        print_warn "Khong tim thay public URL."
+        echo "  Thu: bash install.sh stop && bash install.sh start"
+        echo "  Hoac xem log: grep gradio.live /tmp/vieneu-tts-server.log"
+    fi
 }
 
 # === LENH: START ===
@@ -767,6 +820,10 @@ case "${1:-}" in
         ;;
     startup)
         cmd_startup
+        ;;
+    url)
+        load_config
+        show_public_url_from_file
         ;;
     uninstall)
         cmd_uninstall
