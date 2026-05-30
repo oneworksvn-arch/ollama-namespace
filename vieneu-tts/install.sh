@@ -44,6 +44,11 @@ print_err() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Kiem tra VieNeu-TTS process dang chay
+is_vieneu_running() {
+    pgrep -f "vieneu-web" &>/dev/null || pgrep -f "vieneu-stream" &>/dev/null || pgrep -f "gradio_main" &>/dev/null || pgrep -f "web_stream" &>/dev/null
+}
+
 print_banner() {
     echo -e "${GREEN}${BOLD}"
     echo "  ============================================================"
@@ -282,7 +287,7 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 
 # Start VieNeu-TTS
-if ! pgrep -f "gradio_main\|web_stream\|vieneu-web\|vieneu-stream" &>/dev/null; then
+if ! (pgrep -f "vieneu-web" &>/dev/null || pgrep -f "vieneu-stream" &>/dev/null || pgrep -f "gradio_main" &>/dev/null); then
     log "Starting VieNeu-TTS ($SERVER_MODE mode)..."
     cd "$INSTALL_DIR"
     if [ "$SERVER_MODE" = "stream" ]; then
@@ -330,7 +335,7 @@ while true; do
     fi
 
     # Kiem tra va khoi dong lai VieNeu-TTS neu bi tat
-    if ! pgrep -f "gradio_main\|web_stream\|vieneu-web\|vieneu-stream" &>/dev/null; then
+    if ! (pgrep -f "vieneu-web" &>/dev/null || pgrep -f "vieneu-stream" &>/dev/null || pgrep -f "gradio_main" &>/dev/null); then
         log "VieNeu-TTS khong chay, dang khoi dong lai..."
         if [ -f /workspaces/start-vieneu-tts.sh ]; then
             bash /workspaces/start-vieneu-tts.sh
@@ -456,7 +461,7 @@ cmd_start_internal() {
     export PATH="$HOME/.local/bin:$PATH"
     cd "$INSTALL_DIR"
 
-    if pgrep -f "gradio_main\|web_stream\|vieneu-web\|vieneu-stream" &>/dev/null; then
+    if is_vieneu_running; then
         print_warn "VieNeu-TTS dang chay. Dung 'bash install.sh stop' truoc."
         return 0
     fi
@@ -561,9 +566,9 @@ cmd_status() {
     echo ""
 
     # VieNeu-TTS process
-    if pgrep -f "gradio_main\|web_stream\|vieneu-web\|vieneu-stream" &>/dev/null; then
+    if is_vieneu_running; then
         print_ok "VieNeu-TTS: DANG CHAY"
-        pgrep -fa "gradio_main\|web_stream" 2>/dev/null | head -3
+        pgrep -fa "vieneu" 2>/dev/null | grep -v grep | head -3
     else
         print_err "VieNeu-TTS: KHONG CHAY"
     fi
