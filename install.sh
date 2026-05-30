@@ -137,9 +137,33 @@ load_config() {
     fi
 }
 
+# --- CAI DAT DEPENDENCY ---
+install_deps() {
+    local need_install=false
+    for pkg in zstd nginx curl; do
+        if ! command -v "$pkg" &>/dev/null; then
+            need_install=true
+            break
+        fi
+    done
+    if $need_install; then
+        echo "Cai dat cac goi can thiet (zstd, nginx, curl)..."
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq zstd nginx curl
+        print_ok "Da cai dat cac goi can thiet."
+    fi
+}
+
 # --- CAI DAT OLLAMA ---
 install_ollama() {
     print_step "1/6" "Kiem tra va cai dat Ollama..."
+
+    # Dam bao co zstd (can thiet cho Ollama installer)
+    if ! command -v zstd &>/dev/null; then
+        echo "Cai dat zstd (can thiet cho Ollama)..."
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq zstd
+    fi
 
     if command -v ollama &>/dev/null; then
         print_ok "Ollama da duoc cai dat san."
@@ -201,6 +225,135 @@ install_nginx() {
         sudo apt-get install -y -qq nginx
         print_ok "Cai dat Nginx thanh cong."
     fi
+}
+
+# --- NAMESPACE DEVBOX: AUTO-START & KEEP-ALIVE ---
+setup_autostart() {
+    print_step "*" "Cau hinh auto-start cho Namespace Devbox..."
+
+    # Tao startup script: tu dong bat Ollama + Nginx khi Devbox khoi dong lai
+    local startup_script="/workspaces/start-ollama-gateway.sh"
+    cat > "$startup_script" << 'STARTUP_EOF'
+#!/bin/bash
+# Auto-start Ollama API Gateway khi Devbox khoi dong
+# Script nay duoc goi khi Devbox resume tu trang thai sleep
+
+CONFIG_FILE="/etc/ollama-gateway/config"
+LOG_FILE="/tmp/ollama-gateway-autostart.log"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+log "=== AUTO-START BEGIN ==="
+
+# Load config
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+    log "Config loaded: model=$DEFAULT_MODEL, port=$API_PORT"
+else
+    log "No config found, using defaults"
+    API_PORT=4000
+fi
+
+# Start Ollama
+if ! pgrep -f "ollama serve" &>/dev/null; then
+    log "Starting Ollama..."
+    ollama serve >> /tmp/ollama-serve.log 2>&1 &
+    sleep 3
+    log "Ollama started (PID: $!)"
+else
+    log "Ollama already running"
+fi
+
+# Wait for Ollama to be ready
+for i in $(seq 1 15); do
+    if curl -s http://127.0.0.1:11434/api/tags &>/dev/null; then
+        log "Ollama ready"
+        break
+    fi
+    sleep 2
+done
+
+# Start Nginx
+if ! pgrep -f "nginx" &>/dev/null; then
+    log "Starting Nginx..."
+    sudo service nginx start 2>/dev/null || sudo nginx 2>/dev/null
+    log "Nginx started"
+else
+    log "Nginx already running"
+fi
+
+log "=== AUTO-START COMPLETE ==="
+STARTUP_EOF
+    chmod +x "$startup_script"
+
+    # Tao keep-alive script: giu Devbox khong bi tam dung
+    local keepalive_script="/workspaces/keep-alive.sh"
+    cat > "$keepalive_script" << 'KEEPALIVE_EOF'
+#!/bin/bash
+# Keep Devbox alive - chong tam dung (idle timeout)
+# Chay: nohup /workspaces/keep-alive.sh &
+
+LOG_FILE="/tmp/keep-alive.log"
+TASK_DIR="/.namespace/tasks"
+
+echo "[$(date)] Keep-alive started (PID: $$)" >> "$LOG_FILE"
+
+while true; do
+    # Tao task file de Namespace biet Devbox dang hoat dong
+    sudo mkdir -p "$TASK_DIR" 2>/dev/null
+    sudo touch "${TASK_DIR}/ollama-server" 2>/dev/null
+
+    # Kiem tra va khoi dong lai dich vu neu can
+    if ! pgrep -f "ollama serve" &>/dev/null; then
+        echo "[$(date)] Restarting Ollama..." >> "$LOG_FILE"
+        ollama serve >> /tmp/ollama-serve.log 2>&1 &
+        sleep 3
+    fi
+
+    if ! pgrep -f "nginx" &>/dev/null; then
+        echo "[$(date)] Restarting Nginx..." >> "$LOG_FILE"
+        sudo service nginx start 2>/dev/null || sudo nginx 2>/dev/null
+    fi
+
+    # Ngu 5 phut roi kiem tra lai
+    sleep 300
+done
+KEEPALIVE_EOF
+    chmod +x "$keepalive_script"
+
+    # Them vao bashrc de tu dong chay khi login
+    local bashrc="/home/devbox/.bashrc"
+    if [ ! -f "$bashrc" ]; then
+        bashrc="$HOME/.bashrc"
+    fi
+
+    # Them auto-start vao bashrc (chi them 1 lan)
+    if ! grep -q "start-ollama-gateway" "$bashrc" 2>/dev/null; then
+        cat >> "$bashrc" << 'BASHRC_EOF'
+
+# === Ollama API Gateway Auto-Start ===
+if [ -f /workspaces/start-ollama-gateway.sh ]; then
+    /workspaces/start-ollama-gateway.sh &>/dev/null &
+fi
+# === Keep-Alive (chong Devbox tam dung) ===
+if [ -f /workspaces/keep-alive.sh ] && ! pgrep -f "keep-alive.sh" &>/dev/null; then
+    nohup /workspaces/keep-alive.sh &>/dev/null &
+fi
+BASHRC_EOF
+        print_ok "Da them auto-start vao bashrc."
+    else
+        print_ok "Auto-start da co san trong bashrc."
+    fi
+
+    # Chay keep-alive ngay
+    if ! pgrep -f "keep-alive.sh" &>/dev/null; then
+        nohup "$keepalive_script" &>/dev/null &
+        print_ok "Keep-alive dang chay (PID: $!)."
+    fi
+
+    print_ok "Auto-start da duoc cau hinh. Khi Devbox khoi dong lai, Ollama + Nginx se tu bat."
 }
 
 # --- CAU HINH NGINX REVERSE PROXY ---
@@ -599,10 +752,13 @@ cmd_install() {
     # Step 5: Khoi dong Nginx
     start_nginx
 
-    # Step 6: Luu cau hinh
-    print_step "6/6" "Luu cau hinh he thong..."
+    # Step 6: Luu cau hinh va cau hinh auto-start
+    print_step "6/6" "Luu cau hinh va cau hinh auto-start..."
     save_config
     print_ok "Cau hinh da duoc luu."
+
+    # Cau hinh auto-start cho Namespace Devbox
+    setup_autostart
 
     # Hien thi thong tin
     show_info
@@ -648,6 +804,28 @@ case "$COMMAND" in
     info)
         load_config
         show_info
+        ;;
+    keep-alive)
+        echo "Bat keep-alive (chong Devbox tam dung)..."
+        if [ -f /workspaces/keep-alive.sh ]; then
+            if ! pgrep -f "keep-alive.sh" &>/dev/null; then
+                nohup /workspaces/keep-alive.sh &>/dev/null &
+                print_ok "Keep-alive dang chay (PID: $!)."
+            else
+                print_ok "Keep-alive da dang chay."
+            fi
+        else
+            print_err "Chua cai dat. Chay './install.sh install' truoc."
+        fi
+        ;;
+    startup)
+        echo "Chay startup script..."
+        if [ -f /workspaces/start-ollama-gateway.sh ]; then
+            /workspaces/start-ollama-gateway.sh
+            print_ok "Startup hoan tat."
+        else
+            print_err "Chua cai dat. Chay './install.sh install' truoc."
+        fi
         ;;
     help|--help|-h)
         usage
